@@ -21,6 +21,45 @@ Browser ──► Vercel              (HTML/JS/WASM/imagens, shell leve ~38MB)
 - **CDN global** da Cloudflare em todas as edges.
 - **Custo em produção:** $0/mês até 10M reads/mês (cada carregamento do jogo = 1 read).
 
+## Distribuição de arquivos
+
+Tudo neste diretório é **gerado pelo export Web do Godot**. A divisão de onde cada arquivo vai no deploy é:
+
+| Arquivo | Tamanho aprox. | Destino | Motivo |
+|---|---|---|---|
+| `index.html` | 7.7KB | **Vercel** (repo) | Entry point — servido na raiz do domínio |
+| `index.js` | 280KB | **Vercel** (repo) | Engine do Godot |
+| `index.wasm` | 35MB | **Vercel** (repo) | Binário WebAssembly da engine |
+| `index.png` | 1.8MB | **Vercel** (repo) | Splash screen |
+| `index.icon.png` | 1.8MB | **Vercel** (repo) | Favicon |
+| `index.apple-touch-icon.png` | 66KB | **Vercel** (repo) | Ícone iOS |
+| `index.audio.worklet.js` | 7.3KB | **Vercel** (repo) | Worklet de áudio |
+| `index.audio.position.worklet.js` | 3KB | **Vercel** (repo) | Worklet de áudio posicional |
+| `index.pck` | **216MB** | **Cloudflare R2** | Pacote de assets do jogo — não cabe no Vercel |
+| `DEPLOY.md` | — | **Vercel** (repo) | Esta documentação |
+| `.gitignore`, `.vercelignore` | — | **Vercel** (repo) | Configuração de ignore |
+
+### Resumindo
+- **Repo (GitHub → Vercel):** todos os arquivos **exceto** `index.pck`.
+- **Cloudflare R2:** **apenas** o `index.pck`.
+
+## Fluxo completo (export → deploy)
+
+```
+1. Godot → Project → Export → Web → Export Project
+      ↓ gera/atualiza todos os arquivos deste diretório
+2. Reaplicar customização no index.html (GODOT_PCK_URL + mainPack)
+      ↓ Godot sobrescreve o index.html a cada export
+3. wrangler r2 object put lumera-assets/index.pck ...
+      ↓ sobe o pck pra R2
+4. git commit + git push
+      ↓ atualiza o repo (sem o pck)
+5. vercel --prod
+      ↓ publica o shell no Vercel
+```
+
+⚠️ **Atenção:** a cada reexportação do Godot, o `index.html` é **regenerado do zero**, perdendo a customização (`GODOT_PCK_URL` e `mainPack`). Sempre reaplicar antes do deploy — ver **"Atualizar o jogo"** abaixo.
+
 ## Histórico de tentativas
 
 1. ❌ Deploy completo no Vercel — bloqueado pelo limite de 100MB/arquivo.
@@ -89,16 +128,58 @@ Após estabilizar, recomenda-se restringir `AllowedOrigins` aos domínios finais
 
 ## Procedimento de deploy
 
-1. Garanta que o `index.pck` no R2 corresponde à versão atual do export.
-2. Garanta que `GODOT_PCK_URL` e `fileSizes.index.pck` no `index.html` estão corretos.
-3. Deploy no Vercel:
-   ```bash
-   vercel --prod
-   ```
+### Passo 0 — Exportar do Godot
+No editor do Godot:
 
-Como `index.pck` está no `.gitignore`, o Vercel nunca tenta subir o arquivo grande.
+1. Menu **Project → Export**
+2. Selecione o preset **Web**
+3. Clique **Export Project** → salve **no diretório deste repo** (`c:\Dev\lumera-web-export-v2\`)
+4. Confirme sobrescrever os arquivos existentes
 
-## Atualizar o jogo (nova versão do pck)
+Isso gera/atualiza todos os arquivos `index.*` (HTML, JS, WASM, PCK, imagens, worklets).
+
+### Passo 1 — Reaplicar customização no `index.html`
+O Godot sobrescreve o `index.html` a cada export, então é preciso **reaplicar manualmente**:
+
+No bloco `<script>` antes do `engine.startGame()`, substituir a linha:
+
+```js
+const GODOT_CONFIG = {"args":[],...};
+```
+
+Por:
+
+```js
+const GODOT_PCK_URL = "https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index.pck";
+const GODOT_CONFIG = {"args":[],...,"mainPack":GODOT_PCK_URL};
+```
+
+(Adicionar `mainPack` no objeto de config apontando para a URL do pck no R2.)
+
+### Passo 2 — Subir o `index.pck` pro R2
+```bash
+wrangler r2 object put lumera-assets/index.pck --file=./index.pck --remote
+```
+
+(Ou via dashboard R2 se o arquivo for <300MB — ver **"Atualizar o jogo"**.)
+
+### Passo 3 — Atualizar `fileSizes` se o tamanho mudou
+```bash
+du -b index.pck
+```
+Copiar o número e atualizar `fileSizes.index.pck` no `index.html`.
+
+### Passo 4 — Commit + push + deploy
+```bash
+git add index.html
+git commit -m "update pck"
+git push
+vercel --prod
+```
+
+Como `index.pck` está no `.gitignore` e `.vercelignore`, nem o GitHub nem o Vercel tentam subir o arquivo grande.
+
+## Métodos de upload do pck pro R2
 
 ### Opção A — Wrangler CLI (recomendado, sem limite de tamanho)
 
@@ -108,21 +189,9 @@ npm install -g wrangler
 wrangler login
 ```
 
-A cada nova build:
+A cada build:
 ```bash
-# 1. Export novo do Godot gera index.pck no diretório
-# 2. Upload pro R2 (substitui o anterior):
 wrangler r2 object put lumera-assets/index.pck --file=./index.pck --remote
-
-# 3. Se o tamanho mudou, atualiza no index.html:
-du -b index.pck
-# copia o número e atualiza fileSizes.index.pck em index.html
-
-# 4. Deploy:
-git add index.html
-git commit -m "update pck"
-git push
-vercel --prod
 ```
 
 ### Opção B — Dashboard (limite 300MB)
@@ -130,8 +199,6 @@ vercel --prod
 1. No R2 dashboard, abre o bucket `lumera-assets`
 2. Deleta o `index.pck` antigo
 3. Upload do novo via **Upload** → **Select from computer**
-4. Atualiza `fileSizes.index.pck` no `index.html`
-5. Commit + push + `vercel --prod`
 
 ⚠️ UI só aceita até 300MB por arquivo. Pra arquivos maiores, use wrangler.
 
