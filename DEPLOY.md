@@ -50,6 +50,15 @@ Adicionado `index.pck` para garantir que o arquivo nunca seja commitado (GitHub 
 index.pck
 ```
 
+### `.vercelignore`
+
+**Necessário** — o Vercel CLI **não respeita** `.gitignore` automaticamente. Sem este arquivo, `vercel deploy` tenta subir o `index.pck` local (se existir no diretório) e falha com "File size limit exceeded".
+
+```
+index.pck
+.env*.local
+```
+
 ## Configuração Cloudflare R2
 
 ### Bucket
