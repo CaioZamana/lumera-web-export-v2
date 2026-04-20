@@ -37,6 +37,7 @@ Tudo neste diretório é **gerado pelo export Web do Godot**. A divisão de onde
 | `index.audio.position.worklet.js` | 3KB | **Vercel** (repo) | Worklet de áudio posicional |
 | `index.pck` | **216MB** | **Cloudflare R2** | Pacote de assets do jogo — não cabe no Vercel |
 | `DEPLOY.md` | — | **Vercel** (repo) | Esta documentação |
+| `update-pck-version.sh` | — | **Vercel** (repo) | Script de cache-busting (injeta ETag do pck no `index.html`) |
 | `.gitignore`, `.vercelignore` | — | **Vercel** (repo) | Configuração de ignore |
 
 ### Resumindo
@@ -52,9 +53,11 @@ Tudo neste diretório é **gerado pelo export Web do Godot**. A divisão de onde
       ↓ Godot sobrescreve o index.html a cada export
 3. wrangler r2 object put lumera-assets/index.pck ...
       ↓ sobe o pck pra R2
-4. git commit + git push
+4. ./update-pck-version.sh
+      ↓ injeta ?v=<etag> no GODOT_PCK_URL (cache-busting no browser)
+5. git commit + git push
       ↓ atualiza o repo (sem o pck)
-5. vercel --prod
+6. vercel --prod
       ↓ publica o shell no Vercel
 ```
 
@@ -70,12 +73,14 @@ Tudo neste diretório é **gerado pelo export Web do Godot**. A divisão de onde
 
 ### `index.html`
 
-Adicionada variável `GODOT_PCK_URL` e campo `mainPack` no `GODOT_CONFIG` para apontar o engine do Godot à URL externa do pck:
+Adicionada variável `GODOT_PCK_URL` (com query string de versão `?v=<etag>` para cache-busting no browser) e campo `mainPack` no `GODOT_CONFIG` para apontar o engine do Godot à URL externa do pck:
 
 ```js
-const GODOT_PCK_URL = "https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index.pck";
+const GODOT_PCK_URL = "https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index.pck?v=<etag-do-pck-no-R2>";
 const GODOT_CONFIG = { ..., "mainPack": GODOT_PCK_URL };
 ```
+
+O `?v=<etag>` força browser/CDN a tratar cada pck novo como URL distinta — sem isso, usuários com pck antigo em cache podem pegar binário defasado (R2 não manda `Cache-Control`, então o browser decide heuristicamente por `Last-Modified`, cacheando por minutos/horas).
 
 O campo `fileSizes.index.pck` também foi atualizado para o tamanho real em bytes — usado pela barra de progresso de loading.
 
@@ -154,7 +159,7 @@ const GODOT_PCK_URL = "https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index
 const GODOT_CONFIG = {"args":[],...,"mainPack":GODOT_PCK_URL};
 ```
 
-(Adicionar `mainPack` no objeto de config apontando para a URL do pck no R2.)
+(Adicionar `mainPack` no objeto de config apontando para a URL do pck no R2. O `?v=<etag>` é injetado automaticamente no Passo 3.)
 
 ### Passo 2 — Subir o `index.pck` pro R2
 ```bash
@@ -163,19 +168,87 @@ wrangler r2 object put lumera-assets/index.pck --file=./index.pck --remote
 
 (Ou via dashboard R2 se o arquivo for <300MB — ver **"Atualizar o jogo"**.)
 
-### Passo 3 — Atualizar `fileSizes` se o tamanho mudou
+### Passo 3 — Cache-busting: injetar ETag do pck na URL
+Rodar o script helper (Git Bash no Windows, ou bash/WSL):
+
+```bash
+./update-pck-version.sh
+```
+
+Ele busca o ETag atual do pck no R2 e atualiza o `GODOT_PCK_URL` no `index.html` para `...index.pck?v=<etag>`. Cada pck novo gera um ETag novo → URL nova → browser do usuário ignora cache antigo e baixa o pck novo. Sem isso, usuários podem ficar presos no pck defasado por horas.
+
+Se preferir fazer manual:
+```bash
+curl -sI https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index.pck | grep -i etag
+# copiar o valor entre aspas e colar no ?v=... do index.html
+```
+
+### Passo 4 — Atualizar `fileSizes` se o tamanho mudou
 ```bash
 du -b index.pck
 ```
 Copiar o número e atualizar `fileSizes.index.pck` no `index.html`.
 
-### Passo 4 — Commit + push + deploy
+### Passo 5 — Commit + push + deploy
 ```bash
 git add index.html
 git commit -m "update pck"
 git push
 vercel --prod
 ```
+
+## Cache do browser — estratégia simples
+
+Cada camada tem sua estratégia, resolvendo o problema de "user fica com versão antiga":
+
+| Arquivo | Cache | Como invalida |
+|---|---|---|
+| `index.html` | **Nunca cacheia** (`no-cache, no-store, must-revalidate`) via `vercel.json` | Toda visita baixa fresh |
+| `index.js`, `index.wasm`, imagens | Cache default do Vercel (revalida via ETag) | Novo deploy invalida CDN, browser revalida na próxima request |
+| `index.pck` (Cloudflare R2) | Cache normal do browser | URL versionada `?v=<etag>` — cada pck novo vira URL diferente |
+
+### `vercel.json`
+
+Arquivo na raiz do repo que força HTML sempre fresh:
+
+```json
+{
+  "headers": [
+    {
+      "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    }
+  ]
+}
+```
+
+### Por que isso basta
+
+```
+User abre o site
+  ↓
+Vercel entrega index.html FRESH (never cached)
+  ↓
+index.html referencia index.pck?v=<etag-novo>
+  ↓
+Browser: "URL nova" → baixa do R2
+  ↓
+User joga versão mais recente sem precisar Ctrl+Shift+R
+```
+
+HTML nunca cacheia + ETag do PCK muda a cada update = cadeia toda revalida
+automaticamente. Zero intervenção do user.
+
+### O que NÃO precisa fazer
+
+- ❌ Hash nos nomes dos arquivos JS/WASM (Godot sobrescreve no export; complexidade desnecessária)
+- ❌ Service worker customizado (overkill)
+- ❌ Purge manual do CDN Vercel (Vercel faz automático ao deploy)
+- ❌ Purge manual do Cloudflare R2 (ETag-based versioning no index.html já resolve)
 
 Como `index.pck` está no `.gitignore` e `.vercelignore`, nem o GitHub nem o Vercel tentam subir o arquivo grande.
 
