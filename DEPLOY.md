@@ -37,6 +37,8 @@ Tudo neste diretório é **gerado pelo export Web do Godot**. A divisão de onde
 | `index.audio.position.worklet.js` | 3KB | **Vercel** (repo) | Worklet de áudio posicional |
 | `index.pck` | **216MB** | **Cloudflare R2** | Pacote de assets do jogo — não cabe no Vercel |
 | `DEPLOY.md` | — | **Vercel** (repo) | Esta documentação |
+| `deploy-web.sh` | — | **Vercel** (repo) | Orquestrador: rclone → apply-customizations → vercel deploy |
+| `apply-customizations.sh` | — | **Vercel** (repo) | Reinjeta `GODOT_PCK_URL` + `mainPack` no `index.html` após re-export do Godot |
 | `update-pck-version.sh` | — | **Vercel** (repo) | Script de cache-busting (injeta ETag do pck no `index.html`) |
 | `.gitignore`, `.vercelignore` | — | **Vercel** (repo) | Configuração de ignore |
 
@@ -49,19 +51,26 @@ Tudo neste diretório é **gerado pelo export Web do Godot**. A divisão de onde
 ```
 1. Godot → Project → Export → Web → Export Project
       ↓ gera/atualiza todos os arquivos deste diretório
-2. Reaplicar customização no index.html (GODOT_PCK_URL + mainPack)
-      ↓ Godot sobrescreve o index.html a cada export
-3. wrangler r2 object put lumera-assets/index.pck ...
-      ↓ sobe o pck pra R2
-4. ./update-pck-version.sh
-      ↓ injeta ?v=<etag> no GODOT_PCK_URL (cache-busting no browser)
-5. git commit + git push
-      ↓ atualiza o repo (sem o pck)
-6. vercel --prod
-      ↓ publica o shell no Vercel
+2. ./deploy-web.sh  (Git Bash, dentro desta pasta)
+      ↓ faz, nessa ordem:
+      ├─ rclone copy index.pck r2:lumera-assets  (sobe PCK pro R2)
+      ├─ ./apply-customizations.sh               (reinjeta GODOT_PCK_URL + mainPack com ETag atual)
+      └─ vercel --prod                            (publica shell no Vercel)
 ```
 
-⚠️ **Atenção:** a cada reexportação do Godot, o `index.html` é **regenerado do zero**, perdendo a customização (`GODOT_PCK_URL` e `mainPack`). Sempre reaplicar antes do deploy — ver **"Atualizar o jogo"** abaixo.
+Detalhamento manual (equivalente ao que o script faz), se precisar depurar:
+
+```
+1. rclone copy index.pck r2:lumera-assets -P
+2. ./apply-customizations.sh   (idempotente; detecta HTML cru e reinjeta; depois chama update-pck-version.sh pra preencher ETag)
+3. vercel --prod
+```
+
+⚠️ **Atenção 1:** a cada reexportação do Godot, o `index.html` é **regenerado do zero**, perdendo a customização (`GODOT_PCK_URL` e `mainPack`). O `apply-customizations.sh` detecta isso e reaplica automaticamente — é idempotente, seguro rodar várias vezes.
+
+⚠️ **Atenção 2 — PowerShell NÃO executa `.sh`.** Se você rodar `.\apply-customizations.sh` ou `.\deploy-web.sh` no PowerShell, ele volta silencioso sem erro e **nada acontece**. Sempre use **Git Bash** (ou WSL). Sintoma típico de ter caído nessa: HTML continua cru após rodar o script, e o Vercel serve 404 ao pedir `index.pck`.
+
+⚠️ **Atenção 3 — ordem importa.** `rclone` tem que rodar **antes** do `apply-customizations.sh`, porque o `update-pck-version.sh` (chamado dentro dele) lê o ETag atual do R2 via `curl -sI`. Rodar fora de ordem injeta ETag antigo e o cache-busting falha.
 
 ## Histórico de tentativas
 
@@ -138,64 +147,82 @@ No editor do Godot:
 
 1. Menu **Project → Export**
 2. Selecione o preset **Web**
-3. Clique **Export Project** → salve **no diretório deste repo** (`c:\Dev\lumera-web-export-v2\`)
+3. Clique **Export Project** → salve **no diretório deste repo** (`c:\Dev\lumera_godot_server\lumera-web-export-v2\`)
 4. Confirme sobrescrever os arquivos existentes
 
-Isso gera/atualiza todos os arquivos `index.*` (HTML, JS, WASM, PCK, imagens, worklets).
+Isso gera/atualiza todos os arquivos `index.*` (HTML, JS, WASM, PCK, imagens, worklets). O `fileSizes.index.pck` é atualizado automaticamente pelo Godot.
 
-### Passo 1 — Reaplicar customização no `index.html`
-O Godot sobrescreve o `index.html` a cada export, então é preciso **reaplicar manualmente**:
+### Passo 1 — Rodar `deploy-web.sh` (caminho feliz)
 
-No bloco `<script>` antes do `engine.startGame()`, substituir a linha:
+No **Git Bash**, dentro da pasta:
 
-```js
-const GODOT_CONFIG = {"args":[],...};
+```bash
+cd /c/Dev/lumera_godot_server/lumera-web-export-v2
+./deploy-web.sh
 ```
 
-Por:
+Isso executa as três etapas abaixo em ordem. Se o caminho feliz falhar em alguma etapa, rode manualmente pra isolar o problema — ver **"Passos manuais (debug)"**.
 
-```js
-const GODOT_PCK_URL = "https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index.pck";
-const GODOT_CONFIG = {"args":[],...,"mainPack":GODOT_PCK_URL};
+Flags disponíveis:
+- `./deploy-web.sh --skip-upload` — pula o rclone (útil se o PCK já tá no R2)
+- `./deploy-web.sh --skip-vercel` — só atualiza local + R2 (útil pra preview)
+
+### Passos manuais (debug)
+
+#### 1. Subir `index.pck` pro R2 via rclone
+
+```bash
+../rclone-v1.73.5-windows-amd64/rclone copy index.pck r2:lumera-assets -P
 ```
 
-(Adicionar `mainPack` no objeto de config apontando para a URL do pck no R2. O `?v=<etag>` é injetado automaticamente no Passo 3.)
+O rclone é idempotente — se o arquivo local e o remoto tiverem hash/size iguais, ele reporta `0 B transferred` e segue adiante. Alternativa via wrangler:
 
-### Passo 2 — Subir o `index.pck` pro R2
 ```bash
 wrangler r2 object put lumera-assets/index.pck --file=./index.pck --remote
 ```
 
-(Ou via dashboard R2 se o arquivo for <300MB — ver **"Atualizar o jogo"**.)
+Ou via dashboard R2 (até 300MB por arquivo).
 
-### Passo 3 — Cache-busting: injetar ETag do pck na URL
-Rodar o script helper (Git Bash no Windows, ou bash/WSL):
+#### 2. Reinjetar customizações no `index.html`
+
+```bash
+./apply-customizations.sh
+```
+
+Faz dois sed's no `index.html` (idempotente — pula se já tá customizado):
+
+```js
+const GODOT_PCK_URL = "https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index.pck?v=<etag>";
+const GODOT_CONFIG = {..., "mainPack": GODOT_PCK_URL};
+```
+
+E chama `update-pck-version.sh` no final pra popular o ETag atual do R2 (cache-busting).
+
+Se precisar só atualizar o ETag sem reinjetar (HTML já customizado, só subiu PCK novo):
 
 ```bash
 ./update-pck-version.sh
 ```
 
-Ele busca o ETag atual do pck no R2 e atualiza o `GODOT_PCK_URL` no `index.html` para `...index.pck?v=<etag>`. Cada pck novo gera um ETag novo → URL nova → browser do usuário ignora cache antigo e baixa o pck novo. Sem isso, usuários podem ficar presos no pck defasado por horas.
+#### 3. Deploy no Vercel
 
-Se preferir fazer manual:
 ```bash
-curl -sI https://pub-932401cb337444cf95fc203c447835ce.r2.dev/index.pck | grep -i etag
-# copiar o valor entre aspas e colar no ?v=... do index.html
-```
-
-### Passo 4 — Atualizar `fileSizes` se o tamanho mudou
-```bash
-du -b index.pck
-```
-Copiar o número e atualizar `fileSizes.index.pck` no `index.html`.
-
-### Passo 5 — Commit + push + deploy
-```bash
-git add index.html
-git commit -m "update pck"
-git push
 vercel --prod
 ```
+
+O `.vercelignore` garante que `index.pck` não vai junto.
+
+### Commit + push (opcional)
+
+Se você versionar o `index.html` no repo `lumera-web-export-v2` pra ter histórico:
+
+```bash
+git add index.html
+git commit -m "update pck to <etag>"
+git push
+```
+
+Isso também dispara deploy automático se o Vercel tiver auto-deploy configurado.
 
 ## Cache do browser — estratégia simples
 
