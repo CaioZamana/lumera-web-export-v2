@@ -142,6 +142,22 @@ Após estabilizar, recomenda-se restringir `AllowedOrigins` aos domínios finais
 
 ## Procedimento de deploy
 
+O deploy é feito via **dois scripts independentes**. Quando muda só server Go, roda o primeiro. Quando muda só client Godot, roda o segundo. Quando muda os dois, roda server primeiro (client novo não deve falar com server velho sem o opcode novo):
+
+```bash
+# Server Go → VM Oracle
+./scripts/deploy/deploy.sh
+
+# Client Web → Vercel + Cloudflare R2
+./lumera-web-export-v2/deploy-web.sh
+```
+
+Ambos:
+- Rodam no **Git Bash** (nunca PowerShell — scripts `.sh` não executam nativamente)
+- Pausam no final pra você ler os logs (pressione ENTER pra fechar)
+- Têm retry automático em caso de flap de rede
+- Têm flag `--no-pause` pra CI
+
 ### Passo 0 — Exportar do Godot
 No editor do Godot:
 
