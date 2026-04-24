@@ -148,8 +148,8 @@ O deploy é feito via **dois scripts independentes**. Quando muda só server Go,
 # Server Go → VM Oracle
 ./scripts/deploy/deploy.sh
 
-# Client Web → Vercel + Cloudflare R2
-./lumera-web-export-v2/deploy-web.sh
+# Client Web → export headless do Godot + deploy-web.sh (Vercel + Cloudflare R2)
+./rpg_game_godot/tools/export-web.sh --deploy
 ```
 
 Ambos:
@@ -158,13 +158,35 @@ Ambos:
 - Têm retry automático em caso de flap de rede
 - Têm flag `--no-pause` pra CI
 
-### Passo 0 — Exportar do Godot
-No editor do Godot:
+### Caminho rápido (1 comando) — `export-web.sh`
+
+[tools/export-web.sh](../rpg_game_godot/tools/export-web.sh) substitui o passo manual
+"Godot → Project → Export" pelo CLI headless do Godot. Resultado: do source ao
+Vercel em 1 comando, ~1 min total.
+
+```bash
+# Só exporta (PCK/HTML/JS/WASM vão pro diretório local)
+./rpg_game_godot/tools/export-web.sh
+
+# Exporta + deploya (R2 + Vercel)
+./rpg_game_godot/tools/export-web.sh --deploy
+```
+
+O script:
+- Usa **Godot 4.6.1** do `~/Downloads/Godot_v4.6.1-stable_win64.exe/` (override via `GODOT_BIN=/caminho/godot.exe`)
+- Chama `godot --headless --path . --export-release "Web" ../lumera-web-export-v2/index.html` — usa o preset `Web` de `export_presets.cfg`
+- Valida tamanho do PCK pra detectar export silenciosamente quebrado
+- Com `--deploy`: encadeia `deploy-web.sh` (sem `--no-pause` — pausa natural pra ler logs)
+
+### Passo 0 (fallback manual) — Exportar do Godot pela UI
+
+Alternativa se não quiser usar o script:
 
 1. Menu **Project → Export**
 2. Selecione o preset **Web**
 3. Clique **Export Project** → salve **no diretório deste repo** (`c:\Dev\lumera_godot_server\lumera-web-export-v2\`)
 4. Confirme sobrescrever os arquivos existentes
+5. Depois rode `./deploy-web.sh` dentro desta pasta
 
 Isso gera/atualiza todos os arquivos `index.*` (HTML, JS, WASM, PCK, imagens, worklets). O `fileSizes.index.pck` é atualizado automaticamente pelo Godot.
 
